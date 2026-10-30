@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox, scrolledtext, filedialog, simpledialog
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import queue
@@ -75,7 +76,7 @@ class ProtocolTester:
 
         ttk.Label(left_frame, text="Protocol List", font=("Consolas", 12, "bold")).pack(pady=5)
 
-        self.protocol_listbox = tk.Listbox(left_frame, bg="#2d2d2d", fg="#ffffff", 
+        self.protocol_listbox = tk.Listbox(left_frame, bg="#2d2d2d", fg="#ffffff",
                                            font=("Consolas", 10), selectmode=tk.SINGLE)
         self.protocol_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
         self.protocol_listbox.bind("<<ListboxSelect>>", self.on_protocol_select)
@@ -94,7 +95,7 @@ class ProtocolTester:
         ttk.Label(right_frame, text="Protocol Details", font=("Consolas", 12, "bold")).pack(pady=5)
 
         self.protocol_details = scrolledtext.ScrolledText(right_frame, bg="#2d2d2d", fg="#00ff00",
-                                                           font=("Consolas", 10), height=20)
+                                                          font=("Consolas", 10), height=20)
         self.protocol_details.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.refresh_protocol_list()
@@ -138,14 +139,14 @@ class ProtocolTester:
         mode_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.test_mode = tk.StringVar(value="all")
-        ttk.Radiobutton(mode_frame, text="Test All (All protocols on all ports)", 
-                       variable=self.test_mode, value="all").pack(anchor=tk.W)
-        ttk.Radiobutton(mode_frame, text="Selected Protocol on All Ports", 
-                       variable=self.test_mode, value="proto_all_ports").pack(anchor=tk.W)
-        ttk.Radiobutton(mode_frame, text="All Protocols on Selected Port", 
-                       variable=self.test_mode, value="all_proto_port").pack(anchor=tk.W)
-        ttk.Radiobutton(mode_frame, text="One by One (Interactive)", 
-                       variable=self.test_mode, value="interactive").pack(anchor=tk.W)
+        ttk.Radiobutton(mode_frame, text="Test All (All protocols on all ports)",
+                        variable=self.test_mode, value="all").pack(anchor=tk.W)
+        ttk.Radiobutton(mode_frame, text="Selected Protocol on All Ports",
+                        variable=self.test_mode, value="proto_all_ports").pack(anchor=tk.W)
+        ttk.Radiobutton(mode_frame, text="All Protocols on Selected Port",
+                        variable=self.test_mode, value="all_proto_port").pack(anchor=tk.W)
+        ttk.Radiobutton(mode_frame, text="One by One (Interactive)",
+                        variable=self.test_mode, value="interactive").pack(anchor=tk.W)
 
         ttk.Button(self.test_frame, text="Start Test", command=self.start_test).pack(pady=10)
 
@@ -368,17 +369,29 @@ class ProtocolTester:
         self.results = {}
         self.running = True
 
-        thread = threading.Thread(target=self.run_tests, args=(target_ip, ports, selected_protocols, 
-                                                              mode, max_threads, username, password))
+        thread = threading.Thread(target=self.run_tests, args=(target_ip, ports, selected_protocols,
+                                                               mode, max_threads, username, password))
         thread.daemon = True
         thread.start()
 
+    # ---------- UI-safe helpers ----------
+    def _set_results_header(self, target_ip, ports, protocols, mode):
+        self.results_text.delete("1.0", tk.END)
+        header = (
+            f"Starting tests against {target_ip}\n"
+            f"Ports: {ports}\n"
+            f"Protocols: {protocols}\n"
+            f"Mode: {mode}\n\n"
+        )
+        self.results_text.insert(tk.END, header)
+        self.results_text.see(tk.END)
+
+    def _append_result_log(self, log_line):
+        self.results_text.insert(tk.END, log_line)
+        self.results_text.see(tk.END)
+
     def run_tests(self, target_ip, ports, protocols, mode, max_threads, username, password):
-        self.results_text.delete(1.0, tk.END)
-        self.results_text.insert(tk.END, f"Starting tests against {target_ip}\n")
-        self.results_text.insert(tk.END, f"Ports: {ports}\n")
-        self.results_text.insert(tk.END, f"Protocols: {protocols}\n")
-        self.results_text.insert(tk.END, f"Mode: {mode}\n\n")
+        self.root.after(0, self._set_results_header, target_ip, ports, protocols, mode)
 
         test_queue = []
 
@@ -459,7 +472,7 @@ class ProtocolTester:
 
             if not value:
                 if use_defaults and proto_name in self.default_values and param_name in self.default_values[proto_name]:
-                    return self.test_with_defaults(proto_name, target_ip, port, param_name, 
+                    return self.test_with_defaults(proto_name, target_ip, port, param_name,
                                                    self.default_values[proto_name][param_name], param_values)
                 elif empty_mode == "omit":
                     pattern = rf"\s*[^\s]*{re.escape(placeholder)}[^\s]*"
@@ -467,7 +480,7 @@ class ProtocolTester:
                 else:
                     cmd = cmd.replace(placeholder, "''")
             else:
-                cmd = cmd.replace(placeholder, value)
+                cmd = cmd.replace(placeholder, shlex.quote(str(value)))
 
         cmd = re.sub(r"\s+", " ", cmd).strip()
 
@@ -485,7 +498,7 @@ class ProtocolTester:
             temp_values[param_name.upper()] = default_val
 
             for key, val in temp_values.items():
-                cmd = cmd.replace(key, str(val))
+                cmd = cmd.replace(key, shlex.quote(str(val)))
 
             cmd = re.sub(r"\s+", " ", cmd).strip()
             result = self.run_command(cmd, proto)
@@ -496,8 +509,25 @@ class ProtocolTester:
 
     def run_command(self, cmd, proto):
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-            output = result.stdout + result.stderr
+            command_args = shlex.split(cmd, posix=True)
+            if not command_args:
+                return {
+                    "command": cmd,
+                    "error": "Empty command",
+                    "output": "",
+                    "success": False
+                }
+
+            result = subprocess.run(
+                command_args,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False
+            )
+
+            output = (result.stdout or "") + (result.stderr or "")
 
             success_pattern = proto.get("success_pattern", "")
             failure_pattern = proto.get("failure_pattern", "")
@@ -516,6 +546,8 @@ class ProtocolTester:
             }
         except subprocess.TimeoutExpired:
             return {"command": cmd, "error": "Timeout", "output": "", "success": False}
+        except FileNotFoundError as e:
+            return {"command": cmd, "error": f"Command not found: {e}", "output": "", "success": False}
         except Exception as e:
             return {"command": cmd, "error": str(e), "output": "", "success": False}
 
@@ -535,16 +567,16 @@ class ProtocolTester:
             status = "UNKNOWN"
 
         log_line = f"[{timestamp}] {proto_name} on port {port}: {status}\n"
-        self.results_text.insert(tk.END, log_line)
-        self.results_text.see(tk.END)
+
+        self.root.after(0, self._append_result_log, log_line)
 
     def export_html(self):
         if not self.results:
             messagebox.showwarning("Warning", "No results to export")
             return
 
-        filename = filedialog.asksaveasfilename(defaultextension=".html", 
-                                               filetypes=[("HTML files", "*.html")])
+        filename = filedialog.asksaveasfilename(defaultextension=".html",
+                                                filetypes=[("HTML files", "*.html")])
         if not filename:
             return
 
@@ -566,7 +598,7 @@ class ProtocolTester:
     <title>Protocol Test Report - {timestamp}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ 
+        body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             color: #eaeaea;
@@ -574,9 +606,9 @@ class ProtocolTester:
             min-height: 100vh;
         }}
         .container {{ max-width: 1400px; margin: 0 auto; }}
-        header {{ 
-            text-align: center; 
-            padding: 30px; 
+        header {{
+            text-align: center;
+            padding: 30px;
             background: rgba(0,0,0,0.3);
             border-radius: 15px;
             margin-bottom: 30px;
@@ -584,8 +616,8 @@ class ProtocolTester:
         }}
         h1 {{ color: #00d4ff; font-size: 2.5em; margin-bottom: 10px; }}
         .timestamp {{ color: #888; font-size: 0.9em; }}
-        .summary {{ 
-            display: grid; 
+        .summary {{
+            display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
             margin-bottom: 30px;
@@ -812,7 +844,7 @@ class ProtocolTester:
 
         sample_protocols = {
             "smb": {
-                "command": "crackmapexec smb IPADDRESS -u 'USERNAME' -p 'PASSWORD' -p PORTNUM",
+                "command": "crackmapexec smb IPADDRESS -u USERNAME -p PASSWORD -p PORTNUM",
                 "params": [
                     {"name": "username", "placeholder": "USERNAME", "empty_mode": "empty_string", "use_defaults": True},
                     {"name": "password", "placeholder": "PASSWORD", "empty_mode": "empty_string", "use_defaults": True}
@@ -822,7 +854,7 @@ class ProtocolTester:
                 "availability_check": "which crackmapexec"
             },
             "ssh": {
-                "command": "sshpass -p 'PASSWORD' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p PORTNUM USERNAME@IPADDRESS 'echo connected'",
+                "command": "sshpass -p PASSWORD ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p PORTNUM USERNAME@IPADDRESS 'echo connected'",
                 "params": [
                     {"name": "username", "placeholder": "USERNAME", "empty_mode": "omit", "use_defaults": True},
                     {"name": "password", "placeholder": "PASSWORD", "empty_mode": "omit", "use_defaults": True}
@@ -831,15 +863,14 @@ class ProtocolTester:
                 "failure_pattern": "Permission denied|Connection refused|Authentication failed",
                 "availability_check": "which sshpass"
             },
+            # NOTE: FTP و SMTP از shell operator (heredoc) استفاده می‌کردند
+            # که با shell=False سازگار نیست. برای تست FTP از curl استفاده می‌کنیم.
             "ftp": {
-                "command": "ftp -n IPADDRESS PORTNUM <<EOF\nuser USERNAME PASSWORD\nquit\nEOF",
-                "params": [
-                    {"name": "username", "placeholder": "USERNAME", "empty_mode": "omit", "use_defaults": True},
-                    {"name": "password", "placeholder": "PASSWORD", "empty_mode": "omit", "use_defaults": True}
-                ],
-                "success_pattern": "230|Logged in",
-                "failure_pattern": "530|Login failed|Authentication failed",
-                "availability_check": "which ftp"
+                "command": "curl -sS --max-time 10 ftp://IPADDRESS:PORTNUM/",
+                "params": [],
+                "success_pattern": "220|230|150",
+                "failure_pattern": "530|Login failed|Connection refused|Could not resolve",
+                "availability_check": "which curl"
             },
             "rdp": {
                 "command": "xfreerdp /v:IPADDRESS /u:USERNAME /p:PASSWORD /port:PORTNUM /cert-ignore /timeout:5000 /auth-only",
@@ -861,11 +892,11 @@ class ProtocolTester:
                 "availability_check": "which snmpwalk"
             },
             "smtp": {
-                "command": "nc -w 5 IPADDRESS PORTNUM <<< 'HELO test\nAUTH LOGIN\nQUIT'",
+                "command": "curl -sS --max-time 10 smtp://IPADDRESS:PORTNUM",
                 "params": [],
                 "success_pattern": "220|250",
-                "failure_pattern": "Connection refused|Timeout",
-                "availability_check": "which nc"
+                "failure_pattern": "Connection refused|Timeout|Could not resolve",
+                "availability_check": "which curl"
             },
             "nmap": {
                 "command": "nmap -sV -p PORTNUM --open IPADDRESS",
